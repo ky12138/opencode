@@ -1,0 +1,129 @@
+name: Sync Upstream (Rebase Strategy)
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Configure Git Identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync with Upstream
+        run: |
+          # ============ 配置区 ============
+          UPSTREAM_URL="https://github.com/anomalyco/opencode.git"
+          UPSTREAM_BRANCH="dev"
+          # 需要保留的 workflow 文件（你自己的）
+          KEEP_WORKFLOWS=("sync-upstream.yaml" "build-windows.yaml" "cc.yaml")
+          # ================================
+          
+          echo "Adding upstream remote..."
+          git remote add upstream $UPSTREAM_URL
+          
+          echo "Fetching upstream..."
+          git fetch upstream $UPSTREAM_BRANCH
+          
+          echo "Starting rebase..."
+          
+          # ====== 核心修复：处理 rebase 冲突 ======
+          if ! git rebase upstream/$UPSTREAM_BRANCH; then
+              echo "⚠️ Rebase conflict detected, auto-resolving..."
+              
+              # 循环处理所有冲突的 commit
+              while [ -d ".git/rebase-merge" ] || [ -d ".git/rebase-apply" ]; do
+                  
+                  # 获取所有冲突文件
+                  CONFLICTED_FILES=$(git diff --name-only --diff-filter=U 2>/dev/null || echo "")
+                  
+                  if [ -n "$CONFLICTED_FILES" ]; then
+                      echo "$CONFLICTED_FILES" | while read -r file; do
+                          if [[ "$file" == .github/workflows/* ]]; then
+                              # workflow 文件：直接删除（这正是我们的目标）
+                              echo "  🗑️ Deleting: $file"
+                              git rm -f "$file" 2>/dev/null || true
+                          else
+                              # 其他文件：保留我们的版本
+                              echo "  ✅ Keeping ours: $file"
+                              git checkout --ours "$file" 2>/dev/null && git add "$file" || true
+                          fi
+                      done
+                  fi
+                  
+                  # 尝试继续 rebase，如果是空 commit 则跳过
+                  if ! GIT_EDITOR=true git rebase --continue 2>/dev/null; then
+                      if ! git rebase --skip 2>/dev/null; then
+                          # 都失败了，检查是否已完成
+                          [ ! -d ".git/rebase-merge" ] && [ ! -d ".git/rebase-apply" ] && break
+                      fi
+                  fi
+              done
+              
+              echo "✅ Conflict resolution completed."
+          fi
+          
+          echo "✅ Rebase completed."
+          
+          # ====== 最终清理：删除所有上游 workflow ======
+          echo "🧹 Cleaning up upstream workflows..."
+          
+          if [ -d ".github/workflows" ]; then
+              for file in .github/workflows/*; do
+                  [ -f "$file" ] || continue
+                  filename=$(basename "$file")
+                  
+                  # 检查是否在保留列表中
+                  keep=false
+                  for keep_file in "${KEEP_WORKFLOWS[@]}"; do
+                      [ "$filename" = "$keep_file" ] && keep=true && break
+                  done
+                  
+                  if [ "$keep" = false ]; then
+                      echo "  🗑️ Removing: $filename"
+                      rm -f "$file"
+                  else
+                      echo "  ✅ Keeping: $filename"
+                  fi
+              done
+          fi
+          
+          # ====== 提交清理结果 ======
+          git add .github/workflows
+          
+          if ! git diff-index --quiet HEAD --; then
+              # 查找是否已有 "build workflow" commit，进行合并
+              TARGET_HASH=$(git log --grep="build workflow" -n 1 --format="%H" 2>/dev/null || echo "")
+              
+              if [ -n "$TARGET_HASH" ]; then
+                  echo "📦 Squashing into existing cleanup commit..."
+                  git commit -m "fixup! build workflow"
+                  GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash upstream/$UPSTREAM_BRANCH 2>/dev/null || true
+              else
+                  echo "📦 Creating initial cleanup commit..."
+                  git commit -m "build workflow"
+              fi
+          else
+              echo "ℹ️ No changes to commit."
+          fi
+          
+          echo "🚀 Pushing..."
+          git push origin dev --force-with-lease --no-verify
+          
+          echo "🎉 Sync completed successfully!"

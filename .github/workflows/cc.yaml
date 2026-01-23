@@ -1,0 +1,55 @@
+name: Download Claude Code
+
+on:
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  download-windows-binary:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Get Version and Download
+        id: download
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          
+          # 定义基础 URL
+          $GCS_BUCKET = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"
+          
+          # 1. 获取最新版本号
+          Write-Host "Checking for latest version..."
+          try {
+              $version = Invoke-RestMethod -Uri "$GCS_BUCKET/latest" -ErrorAction Stop
+              $version = $version.Trim()
+              Write-Host "Found version: $version"
+          } catch {
+              Write-Error "Failed to fetch version: $_"
+              exit 1
+          }
+          
+          # 2. 构造下载链接 (强制指定 win32-x64)
+          $platform = "win32-x64"
+          $downloadUrl = "$GCS_BUCKET/$version/$platform/claude.exe"
+          $outputFile = "claude.exe"
+          
+          # 3. 下载文件
+          Write-Host "Downloading from: $downloadUrl"
+          try {
+              Invoke-WebRequest -Uri $downloadUrl -OutFile $outputFile -ErrorAction Stop
+              Write-Host "Download complete."
+          } catch {
+              Write-Error "Failed to download binary: $_"
+              exit 1
+          }
+
+          # 4. 将版本号输出到环境变量，用于构建 Artifact 名称
+          "CLAUDE_VERSION=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Artifact 名称将包含版本号，例如: claude-exe-0.2.9
+          name: claude-exe-${{ steps.download.outputs.CLAUDE_VERSION }}
+          path: claude.exe
+          retention-days: 7 # 文件保留7天
